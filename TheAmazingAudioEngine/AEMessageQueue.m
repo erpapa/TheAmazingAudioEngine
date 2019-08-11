@@ -133,14 +133,26 @@ void AEMessageQueueProcessMessagesOnRealtimeThread(__unsafe_unretained AEMessage
     while ( buffer < end ) {
         assert(buffer->userInfoLength == 0);
         
+        // Check for available space for reply on main thread buffer, and bail if insufficient
+        int32_t availableBytes;
+        TPCircularBufferHead(&THIS->_mainThreadMessageBuffer, &availableBytes);
+        if ( availableBytes < sizeof(message_t) ) {
+#ifdef DEBUG
+            NSLog(@"AEMessageBuffer: Integrity problem, insufficient space in main thread messaging buffer");
+#endif
+            pthread_mutex_unlock(&THIS->_mutex);
+            return;
+        }
+        
+        // Process message for realtime thread
         memcpy(&message, buffer, sizeof(message));
         TPCircularBufferConsume(&THIS->_realtimeThreadMessageBuffer, sizeof(message_t));
         
         if ( message.block ) {
-            ((__bridge void(^)())message.block)();
+            ((__bridge void(^)(void))message.block)();
         }
-
-        int32_t availableBytes;
+        
+        // Write reply to main thread buffer, checking again for available space (above block call may have caused additional writes)
         message_t *reply = TPCircularBufferHead(&THIS->_mainThreadMessageBuffer, &availableBytes);
         if ( availableBytes < sizeof(message_t) ) {
 #ifdef DEBUG
@@ -162,7 +174,7 @@ void AEMessageQueueProcessMessagesOnRealtimeThread(__unsafe_unretained AEMessage
     [self processMainThreadMessagesMatchingResponseBlock:nil];
 }
 
--(void)processMainThreadMessagesMatchingResponseBlock:(void (^)())responseBlock {
+-(void)processMainThreadMessagesMatchingResponseBlock:(void (^)(void))responseBlock {
     pthread_t thread = pthread_self();
     BOOL isMainThread = [NSThread isMainThread];
 
@@ -215,7 +227,7 @@ void AEMessageQueueProcessMessagesOnRealtimeThread(__unsafe_unretained AEMessage
         }
         
         if ( message->responseBlock ) {
-            ((__bridge void(^)())message->responseBlock)();
+            ((__bridge void(^)(void))message->responseBlock)();
             CFBridgingRelease(message->responseBlock);
             
             _pendingResponses--;
@@ -235,8 +247,8 @@ void AEMessageQueueProcessMessagesOnRealtimeThread(__unsafe_unretained AEMessage
     }
 }
 
-- (void)performAsynchronousMessageExchangeWithBlock:(void (^)())block
-                                      responseBlock:(void (^)())responseBlock
+- (void)performAsynchronousMessageExchangeWithBlock:(void (^)(void))block
+                                      responseBlock:(void (^)(void))responseBlock
                                        sourceThread:(pthread_t)sourceThread {
     @synchronized ( self ) {
 
@@ -268,13 +280,13 @@ void AEMessageQueueProcessMessagesOnRealtimeThread(__unsafe_unretained AEMessage
 }
 
 
-- (void)performAsynchronousMessageExchangeWithBlock:(void (^)())block responseBlock:(void (^)())responseBlock {
+- (void)performAsynchronousMessageExchangeWithBlock:(void (^)(void))block responseBlock:(void (^)(void))responseBlock {
     [self performAsynchronousMessageExchangeWithBlock:block responseBlock:responseBlock sourceThread:NULL];
 }
 
-- (BOOL)performSynchronousMessageExchangeWithBlock:(void (^)())block {
+- (BOOL)performSynchronousMessageExchangeWithBlock:(void (^)(void))block {
     __block BOOL finished = NO;
-    void (^responseBlock)() = ^{ finished = YES; };
+    void (^responseBlock)(void) = ^{ finished = YES; };
     [self performAsynchronousMessageExchangeWithBlock:block
                                         responseBlock:responseBlock
                                          sourceThread:pthread_self()];
